@@ -1,5 +1,5 @@
 {
-  description = "Github watch";
+  description = "Github stream";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -22,15 +22,15 @@
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        github-watch = craneLib.buildPackage (commonArgs // {
+        bin = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
         });
       in
       {
-        packages.default = github-watch;
+        packages.default = bin;
 
         checks = {
-          inherit github-watch;
+          inherit bin;
           wt-clippy = craneLib.cargoClippy (commonArgs // {
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";

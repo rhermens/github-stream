@@ -1,8 +1,8 @@
-# github-watch
+# github-stream
 
 Watch GitHub pull request activity from your terminal.
 
-`github-watch` polls open pull requests for your local branch and prints inline
+`github-stream` polls open pull requests for your local branch and prints inline
 review comments and check runs as newline-delimited JSON.
 
 ## Installation
@@ -22,13 +22,13 @@ export GITHUB_TOKEN="$(gh auth token)"
 Run from the root of a GitHub repository with an `origin` remote:
 
 ```sh
-github-watch
+github-stream
 ```
 
 To watch another repository with a 60-second polling interval:
 
 ```sh
-github-watch --cwd /path/to/repository --interval 60
+github-stream --cwd /path/to/repository --interval 60
 ```
 
 ## Output
@@ -43,6 +43,6 @@ check run objects appear in the same stream.
 For readable output with `jq`:
 
 ```sh
-github-watch | jq --unbuffered .
+github-stream | jq --unbuffered .
 ```
 

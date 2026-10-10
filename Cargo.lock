@@ -522,7 +522,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "github-watch"
+name = "github-stream"
 version = "0.1.0"
 dependencies = [
  "chrono",
