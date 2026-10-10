@@ -1,9 +1,12 @@
-use std::{collections::HashMap, env, path::PathBuf, thread, time::Duration};
+use std::{collections::HashMap, env, error::Error, path::PathBuf, thread, time::Duration};
 
 use chrono::{Local, Utc};
 use clap::Parser;
-use git2::Repository;
-use octocrab::models::pulls::Comment;
+use git2::{Remote, Repository};
+use octocrab::{
+    models::{checks::CheckRun, pulls::Comment},
+    params::repos::Commitish,
+};
 
 #[derive(Debug, clap::Parser)]
 struct Args {
@@ -16,18 +19,34 @@ struct Args {
 
 #[derive(Debug)]
 struct ReportState {
-    comments_fetched_at: Option<chrono::DateTime<Utc>>,
-    runs_reported: Vec<String>,
+    fetched_at: Option<chrono::DateTime<Utc>>,
+    checks_reported: HashMap<u64, CheckRun>,
     comments_reported: HashMap<u64, Comment>,
 }
 
 impl ReportState {
     pub fn new() -> Self {
         Self {
-            comments_fetched_at: None,
-            runs_reported: Vec::default(),
+            fetched_at: None,
+            checks_reported: HashMap::default(),
             comments_reported: HashMap::default(),
         }
+    }
+
+    pub fn maybe_push_check(&mut self, check: CheckRun) {
+        let id = check.id.into_inner();
+
+        if self.checks_reported.get(&id).is_some_and(|previous| {
+            previous.started_at == check.started_at && previous.completed_at == check.completed_at
+        }) {
+            return;
+        }
+
+        println!(
+            "{}",
+            serde_json::to_string(&check).expect("Unable to write json")
+        );
+        self.checks_reported.insert(id, check);
     }
 
     pub fn maybe_push_comment(&mut self, comment: Comment) {
@@ -44,6 +63,23 @@ impl ReportState {
     }
 }
 
+struct GithubOrigin<'a>(&'a str, &'a str);
+impl<'a> GithubOrigin<'a> {
+    pub fn from_remote(remote: &'a Remote) -> Result<Self, Box<dyn Error>> {
+        let url = remote.url().expect("Unable to read remote");
+        let slug = url
+            .strip_prefix("https://github.com/")
+            .or_else(|| url.strip_prefix("git@github.com:"))
+            .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+            .ok_or("unsupported GitHub remote URL")?;
+
+        let slug = slug.strip_suffix(".git").unwrap_or(slug);
+        let (owner, repo) = slug.split_once('/').ok_or("invalid remote URL")?;
+
+        Ok(GithubOrigin(owner, repo))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -54,24 +90,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .canonicalize()?;
 
     let local_repo = Repository::open(cwd)?;
+    let remote = local_repo.find_remote("origin")?;
+    let GithubOrigin(owner, repo) = GithubOrigin::from_remote(&remote)?;
+
     let octocrab = octocrab::Octocrab::builder()
         .personal_token(env::var("GITHUB_TOKEN")?)
         .build()?;
 
-    let remote = local_repo.find_remote("origin")?;
-    let url = remote.url().expect("remote URL is not UTF-8");
-
-    let slug = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("git@github.com:"))
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
-        .ok_or("unsupported GitHub remote URL")?;
-
-    let slug = slug.strip_suffix(".git").unwrap_or(slug);
-    let (owner, repo) = slug.split_once('/').ok_or("invalid remote URL")?;
-
     let mut state = ReportState::new();
-
     loop {
         let head = local_repo.head()?;
         if !head.is_branch() {
@@ -88,21 +114,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
 
         for pr in pulls {
+            let loop_start = Local::now().to_utc();
             let comments = octocrab
                 .pulls(owner, repo)
                 .list_comments(Some(pr.number))
-                .since(
-                    state
-                        .comments_fetched_at
-                        .or(pr.created_at)
-                        .expect("No date"),
-                )
+                .since(state.fetched_at.or(pr.created_at).expect("No date"))
                 .send()
                 .await?;
-            state.comments_fetched_at = Some(Local::now().to_utc());
+            let checks = octocrab
+                .checks(owner, repo)
+                .list_check_runs_for_git_ref(Commitish(pr.head.sha))
+                .send()
+                .await?;
+            state.fetched_at = Some(loop_start);
 
             for comment in comments {
                 state.maybe_push_comment(comment);
+            }
+
+            for check in checks.check_runs {
+                state.maybe_push_check(check);
             }
         }
 
