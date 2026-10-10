@@ -13,6 +13,8 @@ async fn main() {
     let args = Args::parse();
     let octocrab = octocrab::instance();
 
+    let pr: Option<String> = None;
+
     loop {
         println!("{:?} {:?}", octocrab, args);
         thread::sleep(Duration::from_secs(args.interval.into()));
