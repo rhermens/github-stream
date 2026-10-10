@@ -34,7 +34,11 @@ impl ReportState {
     }
 
     pub fn maybe_push_check(&mut self, check: CheckRun) {
-        if self.checks_reported.contains_key(&check.id) {
+        let id = check.id.into_inner();
+
+        if self.checks_reported.get(&id).is_some_and(|previous| {
+            previous.started_at == check.started_at && previous.completed_at == check.completed_at
+        }) {
             return;
         }
 
@@ -42,7 +46,7 @@ impl ReportState {
             "{}",
             serde_json::to_string(&check).expect("Unable to write json")
         );
-        self.checks_reported.insert(check.id.into_inner(), check);
+        self.checks_reported.insert(id, check);
     }
 
     pub fn maybe_push_comment(&mut self, comment: Comment) {
