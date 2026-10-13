@@ -3,7 +3,7 @@
 Watch GitHub pull request activity from your terminal.
 
 `github-stream` polls open pull requests for your local branch and prints inline
-review comments and check runs as newline-delimited JSON.
+review comments, check runs, and head commits as newline-delimited JSON.
 
 ## Installation
 ## Authentication
@@ -33,12 +33,14 @@ github-stream --cwd /path/to/repository --interval 60
 
 ## Output
 
-Standard output contains one JSON object per line. Review comment objects and
-check run objects appear in the same stream.
+Standard output contains one JSON object per line. Review comment, check run, and
+commit objects appear in the same stream.
 
 - Each inline review comment is printed once per process, identified by its ID.
 - Each check run is printed when first seen.
 - A check run is printed again when `started_at` or `completed_at` changes.
+- The pull request head commit is printed once per process, identified by its
+  SHA. A push prints the new head commit; intermediate commits are not printed.
 
 For readable output with `jq`:
 

@@ -4,7 +4,7 @@ use chrono::{Local, Utc};
 use clap::Parser;
 use git2::{Remote, Repository};
 use octocrab::{
-    models::{checks::CheckRun, pulls::Comment},
+    models::{checks::CheckRun, pulls::Comment, repos::RepoCommit},
     params::repos::Commitish,
 };
 
@@ -22,6 +22,7 @@ struct ReportState {
     fetched_at: Option<chrono::DateTime<Utc>>,
     checks_reported: HashMap<u64, CheckRun>,
     comments_reported: HashMap<u64, Comment>,
+    commits_reported: HashMap<String, RepoCommit>,
 }
 
 impl ReportState {
@@ -30,6 +31,7 @@ impl ReportState {
             fetched_at: None,
             checks_reported: HashMap::default(),
             comments_reported: HashMap::default(),
+            commits_reported: HashMap::default(),
         }
     }
 
@@ -47,6 +49,18 @@ impl ReportState {
             serde_json::to_string(&check).expect("Unable to write json")
         );
         self.checks_reported.insert(id, check);
+    }
+
+    pub fn maybe_push_commit(&mut self, commit: RepoCommit) {
+        if self.commits_reported.contains_key(&commit.sha) {
+            return;
+        }
+
+        println!(
+            "{}",
+            serde_json::to_string(&commit).expect("Unable to write json")
+        );
+        self.commits_reported.insert(commit.sha.to_owned(), commit);
     }
 
     pub fn maybe_push_comment(&mut self, comment: Comment) {
@@ -123,10 +137,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             let checks = octocrab
                 .checks(owner, repo)
-                .list_check_runs_for_git_ref(Commitish(pr.head.sha))
+                .list_check_runs_for_git_ref(Commitish(pr.head.sha.to_owned()))
                 .send()
                 .await?;
+            let commit = octocrab.commits(owner, repo).get(&pr.head.sha).await?;
             state.fetched_at = Some(loop_start);
+
+            state.maybe_push_commit(commit);
 
             for comment in comments {
                 state.maybe_push_comment(comment);
