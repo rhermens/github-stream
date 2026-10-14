@@ -78,6 +78,15 @@ For readable output with `jq`:
 github-stream | jq --unbuffered .
 ```
 
+## Todos
+
+- [ ] Type wrapper
+- [ ] Formal review bodies   │ No /reviews endpoint. A "Request changes" summary would never be seen.                                         │
+- [ ] Legacy commit statuses │ No /statuses endpoint. Status-based CI would never be seen.                                                    │
+- [ ] PR closed or merged    │ It only looks at open PRs and never reports closure.                                                           │
+- [ ] Long comment lists     │ It fetches only the first page, so comments past the first page can be missed.                                 │
+- [ ] Choosing the PR        │ It only offers --cwd and --interval, so the PR comes from the current branch. Forks and PR numbers don't work. │
+
 ## Coverage and limits
 
 - API lists are not paginated. Busy PRs can have missing records; use paginated
