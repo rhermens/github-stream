@@ -196,6 +196,31 @@ impl<'a> GithubOrigin<'a> {
     }
 }
 
+async fn fetch_check_runs(
+    octocrab: &octocrab::Octocrab,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+) -> octocrab::Result<Vec<CheckRun>> {
+    let mut checks = Vec::new();
+    let mut page_number = 1u32;
+    loop {
+        let page = octocrab
+            .checks(owner, repo)
+            .list_check_runs_for_git_ref(Commitish(sha.to_owned()))
+            .per_page(100)
+            .page(page_number)
+            .send()
+            .await?;
+        let is_empty = page.check_runs.is_empty();
+        checks.extend(page.check_runs);
+        if is_empty || checks.len() as u64 >= page.total_count {
+            return Ok(checks);
+        }
+        page_number += 1;
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -226,14 +251,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let branch = head.shorthand()?;
 
-                let page = octocrab
-                    .pulls(owner, repo)
-                    .list()
-                    .state(State::All)
-                    .head(format!("{owner}:{branch}"))
-                    .send()
-                    .await?;
-                octocrab.all_pages(page).await?
+                octocrab
+                    .all_pages(
+                        octocrab
+                            .pulls(owner, repo)
+                            .list()
+                            .state(State::All)
+                            .head(format!("{owner}:{branch}"))
+                            .per_page(100)
+                            .send()
+                            .await?,
+                    )
+                    .await?
             }
         };
 
@@ -251,36 +280,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let loop_start = Local::now().to_utc();
 
             let reviews = octocrab
-                .pulls(owner, repo)
-                .list_reviews(state.pr.number)
-                .send()
+                .all_pages(
+                    octocrab
+                        .pulls(owner, repo)
+                        .list_reviews(state.pr.number)
+                        .per_page(100)
+                        .send()
+                        .await?,
+                )
                 .await?;
             let comments = octocrab
-                .pulls(owner, repo)
-                .list_comments(Some(state.pr.number))
-                .per_page(100)
-                .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
-                .send()
+                .all_pages(
+                    octocrab
+                        .pulls(owner, repo)
+                        .list_comments(Some(state.pr.number))
+                        .per_page(100)
+                        .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
+                        .send()
+                        .await?,
+                )
                 .await?;
-            let checks = octocrab
-                .checks(owner, repo)
-                .list_check_runs_for_git_ref(Commitish(state.pr.head.sha.to_owned()))
-                .send()
-                .await?;
+            let checks = fetch_check_runs(&octocrab, owner, repo, &state.pr.head.sha).await?;
             let issue_comments = octocrab
-                .issues(owner, repo)
-                .list_comments(state.pr.number)
-                .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
-                .send()
+                .all_pages(
+                    octocrab
+                        .issues(owner, repo)
+                        .list_comments(state.pr.number)
+                        .per_page(100)
+                        .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
+                        .send()
+                        .await?,
+                )
                 .await?;
             let commit = octocrab
                 .commits(owner, repo)
                 .get(&state.pr.head.sha)
                 .await?;
             let statuses = octocrab
-                .repos(owner, repo)
-                .list_statuses(state.pr.head.sha.to_owned())
-                .send()
+                .all_pages(
+                    octocrab
+                        .repos(owner, repo)
+                        .list_statuses(state.pr.head.sha.to_owned())
+                        .per_page(100)
+                        .send()
+                        .await?,
+                )
                 .await?;
 
             state.fetched_at = Some(loop_start);
@@ -297,7 +341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.maybe_set_comment(comment);
             }
 
-            for check in checks.check_runs {
+            for check in checks {
                 state.maybe_set_check(check);
             }
 

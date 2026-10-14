@@ -90,7 +90,6 @@ For example (payload abbreviated):
 {"type":"review_comment","data":{"id":123,"body":"Please update this","path":"src/main.rs"}}
 ```
 
-
 | Object | Behavior | Payload fields (`data`) |
 | --- | --- | --- |
 | Pull request | Printed on discovery and when returned metadata changes, including state and head SHA. | `number`, `state`, `merged_at`, `head`, `base` |
@@ -124,13 +123,6 @@ github-stream | jq --unbuffered 'select(.type == "review_comment") | .data'
 
 ## Coverage and limits
 
-- Branch-based PR discovery fetches all pages. Reviews, comments, check runs,
-  and legacy commit statuses still fetch only the first page.
-- Inline review comments request up to 100 records per pass. Conversation
-  comments use GitHub's default of 30 records per page.
-  Comments beyond the first page can be missed, even on later incremental polls.
-- GitHub supports up to 100 comments per page, but a larger page is not pagination.
-  Use paginated GitHub CLI requests when complete coverage is required.
 - Closed and merged PRs remain eligible for polling; the watcher does not stop
   automatically.
 - No matching PR produces no output. Silence does not confirm a successful poll.
