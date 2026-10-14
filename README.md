@@ -18,11 +18,7 @@ export GITHUB_TOKEN="$(gh auth token)"
 ```
 
 ## Todos
-- [ ] The two bot comments on the PR's main thread (coverage report and Qodana).
-- [ ] The body of the Copilot review.
-- [ ] No closed or merged event: I'd only notice the PR closing by checking the PR status myself.
 - [ ] Partial results: the pr-watch skill says it doesn't fetch every page of results, so a busy PR could lose records.
-- [ ] No head-change check: the skill also has me confirm the latest head commit on every pass.
 
 ## Usage
 
