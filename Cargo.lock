@@ -529,6 +529,7 @@ dependencies = [
  "clap",
  "git2",
  "octocrab",
+ "serde",
  "serde_json",
  "tokio",
 ]
