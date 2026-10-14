@@ -4,7 +4,12 @@ use chrono::{Local, Utc};
 use clap::Parser;
 use git2::{Remote, Repository};
 use octocrab::{
-    models::{checks::CheckRun, pulls::Comment, repos::RepoCommit},
+    models::{
+        checks::CheckRun,
+        issues,
+        pulls::{Comment, PullRequest},
+        repos::RepoCommit,
+    },
     params::repos::Commitish,
 };
 
@@ -19,28 +24,49 @@ struct Args {
 
 #[derive(Debug)]
 struct ReportState {
+    pr: PullRequest,
     fetched_at: Option<chrono::DateTime<Utc>>,
-    checks_reported: HashMap<u64, CheckRun>,
-    comments_reported: HashMap<u64, Comment>,
-    commits_reported: HashMap<String, RepoCommit>,
+    current_check: Option<CheckRun>,
+    current_comment: Option<Comment>,
+    current_issue_comment: Option<issues::Comment>,
+    current_commit: Option<RepoCommit>,
 }
 
 impl ReportState {
-    pub fn new() -> Self {
+    pub fn new(pr: PullRequest) -> Self {
+        println!(
+            "{}",
+            serde_json::to_string(&pr).expect("Unable to write json")
+        );
+
         Self {
+            pr,
             fetched_at: None,
-            checks_reported: HashMap::default(),
-            comments_reported: HashMap::default(),
-            commits_reported: HashMap::default(),
+            current_check: None,
+            current_comment: None,
+            current_issue_comment: None,
+            current_commit: None,
         }
     }
 
-    pub fn maybe_push_check(&mut self, check: CheckRun) {
-        let id = check.id.into_inner();
+    pub fn maybe_update_pr(&mut self, pr: PullRequest) {
+        if self.pr == pr {
+            return;
+        }
 
-        if self.checks_reported.get(&id).is_some_and(|previous| {
-            previous.started_at == check.started_at && previous.completed_at == check.completed_at
-        }) {
+        println!(
+            "{}",
+            serde_json::to_string(&pr).expect("Unable to write json")
+        );
+        self.pr = pr;
+    }
+
+    pub fn maybe_set_check(&mut self, check: CheckRun) {
+        if self
+            .current_check
+            .as_ref()
+            .is_some_and(|current| current == &check)
+        {
             return;
         }
 
@@ -48,11 +74,15 @@ impl ReportState {
             "{}",
             serde_json::to_string(&check).expect("Unable to write json")
         );
-        self.checks_reported.insert(id, check);
+        self.current_check = Some(check);
     }
 
-    pub fn maybe_push_commit(&mut self, commit: RepoCommit) {
-        if self.commits_reported.contains_key(&commit.sha) {
+    pub fn maybe_set_commit(&mut self, commit: RepoCommit) {
+        if self
+            .current_commit
+            .as_ref()
+            .is_some_and(|current| current == &commit)
+        {
             return;
         }
 
@@ -60,11 +90,15 @@ impl ReportState {
             "{}",
             serde_json::to_string(&commit).expect("Unable to write json")
         );
-        self.commits_reported.insert(commit.sha.to_owned(), commit);
+        self.current_commit = Some(commit);
     }
 
-    pub fn maybe_push_comment(&mut self, comment: Comment) {
-        if self.comments_reported.contains_key(&comment.id) {
+    pub fn maybe_set_issue_comment(&mut self, comment: issues::Comment) {
+        if self
+            .current_issue_comment
+            .as_ref()
+            .is_some_and(|current| current == &comment)
+        {
             return;
         }
 
@@ -72,8 +106,23 @@ impl ReportState {
             "{}",
             serde_json::to_string(&comment).expect("Unable to write json")
         );
-        self.comments_reported
-            .insert(comment.id.into_inner(), comment);
+        self.current_issue_comment = Some(comment);
+    }
+
+    pub fn maybe_set_comment(&mut self, comment: Comment) {
+        if self
+            .current_comment
+            .as_ref()
+            .is_some_and(|current| current == &comment)
+        {
+            return;
+        }
+
+        println!(
+            "{}",
+            serde_json::to_string(&comment).expect("Unable to write json")
+        );
+        self.current_comment = Some(comment);
     }
 }
 
@@ -111,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .personal_token(env::var("GITHUB_TOKEN")?)
         .build()?;
 
-    let mut state = ReportState::new();
+    let mut states: HashMap<u64, ReportState> = HashMap::new();
     loop {
         let head = local_repo.head()?;
         if !head.is_branch() {
@@ -128,29 +177,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
 
         for pr in pulls {
+            let state = match states.entry(pr.number) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().maybe_update_pr(pr);
+                    entry.into_mut()
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(ReportState::new(pr))
+                }
+            };
+
             let loop_start = Local::now().to_utc();
             let comments = octocrab
                 .pulls(owner, repo)
-                .list_comments(Some(pr.number))
-                .since(state.fetched_at.or(pr.created_at).expect("No date"))
+                .list_comments(Some(state.pr.number))
+                .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
                 .send()
                 .await?;
             let checks = octocrab
                 .checks(owner, repo)
-                .list_check_runs_for_git_ref(Commitish(pr.head.sha.to_owned()))
+                .list_check_runs_for_git_ref(Commitish(state.pr.head.sha.to_owned()))
                 .send()
                 .await?;
-            let commit = octocrab.commits(owner, repo).get(&pr.head.sha).await?;
+            let issue_comments = octocrab
+                .issues(owner, repo)
+                .list_comments(state.pr.number)
+                .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
+                .send()
+                .await?;
+            let commit = octocrab
+                .commits(owner, repo)
+                .get(&state.pr.head.sha)
+                .await?;
+
             state.fetched_at = Some(loop_start);
-
-            state.maybe_push_commit(commit);
-
+            state.maybe_set_commit(commit);
             for comment in comments {
-                state.maybe_push_comment(comment);
+                state.maybe_set_comment(comment);
             }
 
             for check in checks.check_runs {
-                state.maybe_push_check(check);
+                state.maybe_set_check(check);
+            }
+
+            for issue_comment in issue_comments {
+                state.maybe_set_issue_comment(issue_comment);
             }
         }
 
