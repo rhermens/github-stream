@@ -5,21 +5,37 @@ use clap::Parser;
 use git2::{Remote, Repository};
 use octocrab::{
     models::{
+        Status,
         checks::CheckRun,
         issues,
-        pulls::{Comment, PullRequest},
+        pulls::{Comment, PullRequest, Review},
         repos::RepoCommit,
     },
-    params::repos::Commitish,
+    params::{State, repos::Commitish},
 };
 
 #[derive(Debug, clap::Parser)]
 struct Args {
     #[arg(short, long, default_value_t = 30)]
-    pub interval: u8,
+    pub interval: u64,
 
     #[arg(short, long)]
     pub cwd: Option<PathBuf>,
+
+    #[arg(short, long)]
+    pub pr: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+enum Event<'a> {
+    PullRequest(&'a PullRequest),
+    ReviewComment(&'a Comment),
+    ConversationComment(&'a issues::Comment),
+    CheckRun(&'a CheckRun),
+    HeadCommit(&'a RepoCommit),
+    Review(&'a Review),
+    Status(&'a Status),
 }
 
 #[derive(Debug)]
@@ -27,25 +43,29 @@ struct ReportState {
     pr: PullRequest,
     fetched_at: Option<chrono::DateTime<Utc>>,
     current_check: Option<CheckRun>,
+    current_review: Option<Review>,
     current_comment: Option<Comment>,
     current_issue_comment: Option<issues::Comment>,
     current_commit: Option<RepoCommit>,
+    current_status: Option<Status>,
 }
 
 impl ReportState {
     pub fn new(pr: PullRequest) -> Self {
         println!(
             "{}",
-            serde_json::to_string(&pr).expect("Unable to write json")
+            serde_json::to_string(&Event::PullRequest(&pr)).expect("Unable to write json")
         );
 
         Self {
             pr,
             fetched_at: None,
             current_check: None,
+            current_review: None,
             current_comment: None,
             current_issue_comment: None,
             current_commit: None,
+            current_status: None,
         }
     }
 
@@ -56,9 +76,41 @@ impl ReportState {
 
         println!(
             "{}",
-            serde_json::to_string(&pr).expect("Unable to write json")
+            serde_json::to_string(&Event::PullRequest(&pr)).expect("Unable to write json")
         );
         self.pr = pr;
+    }
+
+    pub fn maybe_set_status(&mut self, status: Status) {
+        if self
+            .current_status
+            .as_ref()
+            .is_some_and(|current| current == &status)
+        {
+            return;
+        }
+
+        println!(
+            "{}",
+            serde_json::to_string(&Event::Status(&status)).expect("Unable to write json")
+        );
+        self.current_status = Some(status);
+    }
+
+    pub fn maybe_set_review(&mut self, review: Review) {
+        if self
+            .current_review
+            .as_ref()
+            .is_some_and(|current| current == &review)
+        {
+            return;
+        }
+
+        println!(
+            "{}",
+            serde_json::to_string(&Event::Review(&review)).expect("Unable to write json")
+        );
+        self.current_review = Some(review);
     }
 
     pub fn maybe_set_check(&mut self, check: CheckRun) {
@@ -72,7 +124,7 @@ impl ReportState {
 
         println!(
             "{}",
-            serde_json::to_string(&check).expect("Unable to write json")
+            serde_json::to_string(&Event::CheckRun(&check)).expect("Unable to write json")
         );
         self.current_check = Some(check);
     }
@@ -88,7 +140,7 @@ impl ReportState {
 
         println!(
             "{}",
-            serde_json::to_string(&commit).expect("Unable to write json")
+            serde_json::to_string(&Event::HeadCommit(&commit)).expect("Unable to write json")
         );
         self.current_commit = Some(commit);
     }
@@ -104,7 +156,8 @@ impl ReportState {
 
         println!(
             "{}",
-            serde_json::to_string(&comment).expect("Unable to write json")
+            serde_json::to_string(&Event::ConversationComment(&comment))
+                .expect("Unable to write json")
         );
         self.current_issue_comment = Some(comment);
     }
@@ -120,7 +173,7 @@ impl ReportState {
 
         println!(
             "{}",
-            serde_json::to_string(&comment).expect("Unable to write json")
+            serde_json::to_string(&Event::ReviewComment(&comment)).expect("Unable to write json")
         );
         self.current_comment = Some(comment);
     }
@@ -162,19 +215,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut states: HashMap<u64, ReportState> = HashMap::new();
     loop {
-        let head = local_repo.head()?;
-        if !head.is_branch() {
-            continue;
-        }
-        let branch = head.shorthand()?;
+        let pulls: Vec<PullRequest> = match args.pr {
+            Some(number) => {
+                vec![octocrab.pulls(owner, repo).get(number).await?]
+            }
+            None => {
+                let head = local_repo.head()?;
+                if !head.is_branch() {
+                    continue;
+                }
+                let branch = head.shorthand()?;
 
-        let pulls = octocrab
-            .pulls(owner, repo)
-            .list()
-            .state(octocrab::params::State::Open)
-            .head(format!("{owner}:{branch}"))
-            .send()
-            .await?;
+                let page = octocrab
+                    .pulls(owner, repo)
+                    .list()
+                    .state(State::All)
+                    .head(format!("{owner}:{branch}"))
+                    .send()
+                    .await?;
+                octocrab.all_pages(page).await?
+            }
+        };
 
         for pr in pulls {
             let state = match states.entry(pr.number) {
@@ -188,9 +249,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let loop_start = Local::now().to_utc();
+
+            let reviews = octocrab
+                .pulls(owner, repo)
+                .list_reviews(state.pr.number)
+                .send()
+                .await?;
             let comments = octocrab
                 .pulls(owner, repo)
                 .list_comments(Some(state.pr.number))
+                .per_page(100)
                 .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
                 .send()
                 .await?;
@@ -209,9 +277,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .commits(owner, repo)
                 .get(&state.pr.head.sha)
                 .await?;
+            let statuses = octocrab
+                .repos(owner, repo)
+                .list_statuses(state.pr.head.sha.to_owned())
+                .send()
+                .await?;
 
             state.fetched_at = Some(loop_start);
             state.maybe_set_commit(commit);
+            for review in reviews {
+                state.maybe_set_review(review);
+            }
+
+            for status in statuses {
+                state.maybe_set_status(status);
+            }
+
             for comment in comments {
                 state.maybe_set_comment(comment);
             }
@@ -225,6 +306,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        thread::sleep(Duration::from_secs(args.interval.into()));
+        thread::sleep(Duration::from_secs(args.interval));
     }
 }
