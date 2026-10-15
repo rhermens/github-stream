@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, error::Error, path::PathBuf, thread, time::Duration};
+use std::{collections::HashMap, env, error::Error, path::PathBuf, time::Duration};
 
 use chrono::{Local, Utc};
 use clap::Parser;
@@ -212,53 +212,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let loop_start = Local::now().to_utc();
 
-            let reviews = octocrab
-                .all_pages(
+            let (reviews, comments, checks, issue_comments, commit, statuses) = tokio::try_join!(
+                async {
                     octocrab
-                        .pulls(owner, repo)
-                        .list_reviews(state.pr.number)
-                        .per_page(100)
-                        .send()
-                        .await?,
-                )
-                .await?;
-            let comments = octocrab
-                .all_pages(
+                        .all_pages(
+                            octocrab
+                                .pulls(owner, repo)
+                                .list_reviews(state.pr.number)
+                                .per_page(100)
+                                .send()
+                                .await?,
+                        )
+                        .await
+                },
+                async {
                     octocrab
-                        .pulls(owner, repo)
-                        .list_comments(Some(state.pr.number))
-                        .per_page(100)
-                        .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
-                        .send()
-                        .await?,
-                )
-                .await?;
-            let checks = fetch_check_runs(&octocrab, owner, repo, &state.pr.head.sha).await?;
-            let issue_comments = octocrab
-                .all_pages(
+                        .all_pages(
+                            octocrab
+                                .pulls(owner, repo)
+                                .list_comments(Some(state.pr.number))
+                                .per_page(100)
+                                .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
+                                .send()
+                                .await?,
+                        )
+                        .await
+                },
+                async { fetch_check_runs(&octocrab, owner, repo, &state.pr.head.sha).await },
+                async {
                     octocrab
-                        .issues(owner, repo)
-                        .list_comments(state.pr.number)
-                        .per_page(100)
-                        .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
-                        .send()
-                        .await?,
-                )
-                .await?;
-            let commit = octocrab
-                .commits(owner, repo)
-                .get(&state.pr.head.sha)
-                .await?;
-            let statuses = octocrab
-                .all_pages(
+                        .all_pages(
+                            octocrab
+                                .issues(owner, repo)
+                                .list_comments(state.pr.number)
+                                .per_page(100)
+                                .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
+                                .send()
+                                .await?,
+                        )
+                        .await
+                },
+                async { octocrab.commits(owner, repo).get(&state.pr.head.sha).await },
+                async {
                     octocrab
-                        .repos(owner, repo)
-                        .list_statuses(state.pr.head.sha.to_owned())
-                        .per_page(100)
-                        .send()
-                        .await?,
-                )
-                .await?;
+                        .all_pages(
+                            octocrab
+                                .repos(owner, repo)
+                                .list_statuses(state.pr.head.sha.to_owned())
+                                .per_page(100)
+                                .send()
+                                .await?,
+                        )
+                        .await
+                }
+            )?;
 
             state.fetched_at = Some(loop_start);
             state.maybe_set_event(Event::HeadCommit(commit));
@@ -283,6 +290,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        thread::sleep(Duration::from_secs(args.interval));
+        tokio::time::sleep(Duration::from_secs(args.interval)).await;
     }
 }
