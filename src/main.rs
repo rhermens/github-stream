@@ -28,12 +28,12 @@ struct Args {
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum EventKey {
-    ReviewComment,
-    ConversationComment,
-    CheckRun,
+    ReviewComment(u64),
+    ConversationComment(u64),
+    CheckRun(u64),
     HeadCommit,
-    Review,
-    Status,
+    Review(u64),
+    Status(u64),
 }
 
 #[derive(serde::Serialize, Debug, PartialEq)]
@@ -56,12 +56,12 @@ enum PR<'a> {
 impl Event {
     pub fn key(&self) -> EventKey {
         match self {
-            Event::ReviewComment(_) => EventKey::ReviewComment,
-            Event::ConversationComment(_) => EventKey::ConversationComment,
-            Event::CheckRun(_) => EventKey::CheckRun,
-            Event::Review(_) => EventKey::Review,
+            Event::ReviewComment(e) => EventKey::ReviewComment(e.id.0),
+            Event::ConversationComment(e) => EventKey::ConversationComment(e.id.0),
+            Event::CheckRun(e) => EventKey::CheckRun(e.id.0),
+            Event::Review(e) => EventKey::Review(e.id.0),
+            Event::Status(e) => EventKey::Status(e.id.map_or(0, |id| id.0)),
             Event::HeadCommit(_) => EventKey::HeadCommit,
-            Event::Status(_) => EventKey::Status,
         }
     }
 }
