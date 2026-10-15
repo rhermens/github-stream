@@ -26,46 +26,64 @@ struct Args {
     pub pr: Option<u64>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum EventKey {
+    ReviewComment,
+    ConversationComment,
+    CheckRun,
+    HeadCommit,
+    Review,
+    Status,
+}
+
+#[derive(serde::Serialize, Debug, PartialEq)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-enum Event<'a> {
+enum Event {
+    ReviewComment(Comment),
+    ConversationComment(issues::Comment),
+    CheckRun(CheckRun),
+    HeadCommit(RepoCommit),
+    Review(Review),
+    Status(Status),
+}
+
+#[derive(serde::Serialize, Debug, PartialEq)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+enum PR<'a> {
     PullRequest(&'a PullRequest),
-    ReviewComment(&'a Comment),
-    ConversationComment(&'a issues::Comment),
-    CheckRun(&'a CheckRun),
-    HeadCommit(&'a RepoCommit),
-    Review(&'a Review),
-    Status(&'a Status),
+}
+
+impl Event {
+    pub fn key(&self) -> EventKey {
+        match self {
+            Event::ReviewComment(_) => EventKey::ReviewComment,
+            Event::ConversationComment(_) => EventKey::ConversationComment,
+            Event::CheckRun(_) => EventKey::CheckRun,
+            Event::Review(_) => EventKey::Review,
+            Event::HeadCommit(_) => EventKey::HeadCommit,
+            Event::Status(_) => EventKey::Status,
+        }
+    }
 }
 
 #[derive(Debug)]
 struct ReportState {
     pr: PullRequest,
     fetched_at: Option<chrono::DateTime<Utc>>,
-    current_check: Option<CheckRun>,
-    current_review: Option<Review>,
-    current_comment: Option<Comment>,
-    current_issue_comment: Option<issues::Comment>,
-    current_commit: Option<RepoCommit>,
-    current_status: Option<Status>,
+    events: HashMap<EventKey, Event>,
 }
 
 impl ReportState {
     pub fn new(pr: PullRequest) -> Self {
         println!(
             "{}",
-            serde_json::to_string(&Event::PullRequest(&pr)).expect("Unable to write json")
+            serde_json::to_string(&PR::PullRequest(&pr)).expect("Unable to write json")
         );
 
         Self {
             pr,
             fetched_at: None,
-            current_check: None,
-            current_review: None,
-            current_comment: None,
-            current_issue_comment: None,
-            current_commit: None,
-            current_status: None,
+            events: HashMap::with_capacity(6),
         }
     }
 
@@ -76,106 +94,21 @@ impl ReportState {
 
         println!(
             "{}",
-            serde_json::to_string(&Event::PullRequest(&pr)).expect("Unable to write json")
+            serde_json::to_string(&PR::PullRequest(&pr)).expect("Unable to write json")
         );
         self.pr = pr;
     }
 
-    pub fn maybe_set_status(&mut self, status: Status) {
-        if self
-            .current_status
-            .as_ref()
-            .is_some_and(|current| current == &status)
-        {
+    pub fn maybe_set_event(&mut self, event: Event) {
+        if self.events.get(&event.key()).is_some_and(|e| e == &event) {
             return;
         }
 
         println!(
             "{}",
-            serde_json::to_string(&Event::Status(&status)).expect("Unable to write json")
+            serde_json::to_string(&event).expect("Unable to write json")
         );
-        self.current_status = Some(status);
-    }
-
-    pub fn maybe_set_review(&mut self, review: Review) {
-        if self
-            .current_review
-            .as_ref()
-            .is_some_and(|current| current == &review)
-        {
-            return;
-        }
-
-        println!(
-            "{}",
-            serde_json::to_string(&Event::Review(&review)).expect("Unable to write json")
-        );
-        self.current_review = Some(review);
-    }
-
-    pub fn maybe_set_check(&mut self, check: CheckRun) {
-        if self
-            .current_check
-            .as_ref()
-            .is_some_and(|current| current == &check)
-        {
-            return;
-        }
-
-        println!(
-            "{}",
-            serde_json::to_string(&Event::CheckRun(&check)).expect("Unable to write json")
-        );
-        self.current_check = Some(check);
-    }
-
-    pub fn maybe_set_commit(&mut self, commit: RepoCommit) {
-        if self
-            .current_commit
-            .as_ref()
-            .is_some_and(|current| current == &commit)
-        {
-            return;
-        }
-
-        println!(
-            "{}",
-            serde_json::to_string(&Event::HeadCommit(&commit)).expect("Unable to write json")
-        );
-        self.current_commit = Some(commit);
-    }
-
-    pub fn maybe_set_issue_comment(&mut self, comment: issues::Comment) {
-        if self
-            .current_issue_comment
-            .as_ref()
-            .is_some_and(|current| current == &comment)
-        {
-            return;
-        }
-
-        println!(
-            "{}",
-            serde_json::to_string(&Event::ConversationComment(&comment))
-                .expect("Unable to write json")
-        );
-        self.current_issue_comment = Some(comment);
-    }
-
-    pub fn maybe_set_comment(&mut self, comment: Comment) {
-        if self
-            .current_comment
-            .as_ref()
-            .is_some_and(|current| current == &comment)
-        {
-            return;
-        }
-
-        println!(
-            "{}",
-            serde_json::to_string(&Event::ReviewComment(&comment)).expect("Unable to write json")
-        );
-        self.current_comment = Some(comment);
+        self.events.insert(event.key(), event);
     }
 }
 
@@ -328,25 +261,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
 
             state.fetched_at = Some(loop_start);
-            state.maybe_set_commit(commit);
+            state.maybe_set_event(Event::HeadCommit(commit));
             for review in reviews {
-                state.maybe_set_review(review);
+                state.maybe_set_event(Event::Review(review));
             }
 
             for status in statuses {
-                state.maybe_set_status(status);
+                state.maybe_set_event(Event::Status(status));
             }
 
             for comment in comments {
-                state.maybe_set_comment(comment);
+                state.maybe_set_event(Event::ReviewComment(comment));
             }
 
             for check in checks {
-                state.maybe_set_check(check);
+                state.maybe_set_event(Event::CheckRun(check));
             }
 
             for issue_comment in issue_comments {
-                state.maybe_set_issue_comment(issue_comment);
+                state.maybe_set_event(Event::ConversationComment(issue_comment));
             }
         }
 
