@@ -2,8 +2,10 @@ use std::{collections::HashMap, env, error::Error, path::PathBuf, time::Duration
 
 use chrono::{Local, Utc};
 use clap::Parser;
+use futures::{StreamExt, TryStreamExt, stream};
 use git2::{Remote, Repository};
 use octocrab::{
+    Octocrab,
     models::{
         Status,
         checks::CheckRun,
@@ -13,6 +15,7 @@ use octocrab::{
     },
     params::{State, repos::Commitish},
 };
+use serde::Serialize;
 
 #[derive(Debug, clap::Parser)]
 struct Args {
@@ -66,6 +69,27 @@ impl Event {
     }
 }
 
+macro_rules! impl_event_from {
+    ($($ty:ty => $variant:ident),* $(,)?) => {
+        $(
+            impl From<$ty> for Event {
+                fn from(value: $ty) -> Self {
+                    Self::$variant(value)
+                }
+            }
+        )*
+    };
+}
+
+impl_event_from! {
+    Comment => ReviewComment,
+    issues::Comment => ConversationComment,
+    CheckRun => CheckRun,
+    RepoCommit => HeadCommit,
+    Review => Review,
+    Status => Status,
+}
+
 #[derive(Debug)]
 struct ReportState {
     pr: PullRequest,
@@ -75,16 +99,13 @@ struct ReportState {
 
 impl ReportState {
     pub fn new(pr: PullRequest) -> Self {
-        println!(
-            "{}",
-            serde_json::to_string(&PR::PullRequest(&pr)).expect("Unable to write json")
-        );
-
-        Self {
+        let ret = Self {
             pr,
             fetched_at: None,
             events: HashMap::with_capacity(6),
-        }
+        };
+        ret.emit(&PR::PullRequest(&ret.pr));
+        ret
     }
 
     pub fn maybe_update_pr(&mut self, pr: PullRequest) {
@@ -92,23 +113,111 @@ impl ReportState {
             return;
         }
 
+        self.emit(&PR::PullRequest(&pr));
+        self.pr = pr;
+    }
+
+    fn emit<T: Serialize>(&self, event: &T) {
         println!(
             "{}",
-            serde_json::to_string(&PR::PullRequest(&pr)).expect("Unable to write json")
+            serde_json::to_string(event).expect("Unable to write json")
         );
-        self.pr = pr;
     }
 
     pub fn maybe_set_event(&mut self, event: Event) {
         if self.events.get(&event.key()).is_some_and(|e| e == &event) {
             return;
         }
-
-        println!(
-            "{}",
-            serde_json::to_string(&event).expect("Unable to write json")
-        );
+        self.emit(&event);
         self.events.insert(event.key(), event);
+    }
+
+    pub async fn refresh(
+        &mut self,
+        octocrab: &Octocrab,
+        owner: &str,
+        repo: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let loop_start = Local::now().to_utc();
+
+        let (reviews, comments, checks, issue_comments, commit, statuses) = tokio::try_join!(
+            async {
+                octocrab
+                    .all_pages(
+                        octocrab
+                            .pulls(owner, repo)
+                            .list_reviews(self.pr.number)
+                            .per_page(100)
+                            .send()
+                            .await?,
+                    )
+                    .await
+            },
+            async {
+                octocrab
+                    .all_pages(
+                        octocrab
+                            .pulls(owner, repo)
+                            .list_comments(Some(self.pr.number))
+                            .per_page(100)
+                            .since(self.fetched_at.or(self.pr.created_at).expect("No date"))
+                            .send()
+                            .await?,
+                    )
+                    .await
+            },
+            async { fetch_check_runs(octocrab, owner, repo, &self.pr.head.sha).await },
+            async {
+                octocrab
+                    .all_pages(
+                        octocrab
+                            .issues(owner, repo)
+                            .list_comments(self.pr.number)
+                            .per_page(100)
+                            .since(self.fetched_at.or(self.pr.created_at).expect("No date"))
+                            .send()
+                            .await?,
+                    )
+                    .await
+            },
+            async { octocrab.commits(owner, repo).get(&self.pr.head.sha).await },
+            async {
+                octocrab
+                    .all_pages(
+                        octocrab
+                            .repos(owner, repo)
+                            .list_statuses(self.pr.head.sha.to_owned())
+                            .per_page(100)
+                            .send()
+                            .await?,
+                    )
+                    .await
+            }
+        )?;
+
+        self.fetched_at = Some(loop_start);
+        self.maybe_set_event(commit.into());
+        for review in reviews {
+            self.maybe_set_event(review.into());
+        }
+
+        for status in statuses {
+            self.maybe_set_event(status.into());
+        }
+
+        for comment in comments {
+            self.maybe_set_event(comment.into());
+        }
+
+        for check in checks {
+            self.maybe_set_event(check.into());
+        }
+
+        for issue_comment in issue_comments {
+            self.maybe_set_event(issue_comment.into());
+        }
+
+        Ok(())
     }
 }
 
@@ -200,7 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         for pr in pulls {
-            let state = match states.entry(pr.number) {
+            match states.entry(pr.number) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
                     entry.get_mut().maybe_update_pr(pr);
                     entry.into_mut()
@@ -209,86 +318,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     entry.insert(ReportState::new(pr))
                 }
             };
-
-            let loop_start = Local::now().to_utc();
-
-            let (reviews, comments, checks, issue_comments, commit, statuses) = tokio::try_join!(
-                async {
-                    octocrab
-                        .all_pages(
-                            octocrab
-                                .pulls(owner, repo)
-                                .list_reviews(state.pr.number)
-                                .per_page(100)
-                                .send()
-                                .await?,
-                        )
-                        .await
-                },
-                async {
-                    octocrab
-                        .all_pages(
-                            octocrab
-                                .pulls(owner, repo)
-                                .list_comments(Some(state.pr.number))
-                                .per_page(100)
-                                .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
-                                .send()
-                                .await?,
-                        )
-                        .await
-                },
-                async { fetch_check_runs(&octocrab, owner, repo, &state.pr.head.sha).await },
-                async {
-                    octocrab
-                        .all_pages(
-                            octocrab
-                                .issues(owner, repo)
-                                .list_comments(state.pr.number)
-                                .per_page(100)
-                                .since(state.fetched_at.or(state.pr.created_at).expect("No date"))
-                                .send()
-                                .await?,
-                        )
-                        .await
-                },
-                async { octocrab.commits(owner, repo).get(&state.pr.head.sha).await },
-                async {
-                    octocrab
-                        .all_pages(
-                            octocrab
-                                .repos(owner, repo)
-                                .list_statuses(state.pr.head.sha.to_owned())
-                                .per_page(100)
-                                .send()
-                                .await?,
-                        )
-                        .await
-                }
-            )?;
-
-            state.fetched_at = Some(loop_start);
-            state.maybe_set_event(Event::HeadCommit(commit));
-            for review in reviews {
-                state.maybe_set_event(Event::Review(review));
-            }
-
-            for status in statuses {
-                state.maybe_set_event(Event::Status(status));
-            }
-
-            for comment in comments {
-                state.maybe_set_event(Event::ReviewComment(comment));
-            }
-
-            for check in checks {
-                state.maybe_set_event(Event::CheckRun(check));
-            }
-
-            for issue_comment in issue_comments {
-                state.maybe_set_event(Event::ConversationComment(issue_comment));
-            }
         }
+
+        stream::iter(
+            states
+                .values_mut()
+                .map(|s| s.refresh(&octocrab, owner, repo)),
+        )
+        .buffer_unordered(4)
+        .try_collect::<Vec<()>>()
+        .await?;
 
         tokio::time::sleep(Duration::from_secs(args.interval)).await;
     }
