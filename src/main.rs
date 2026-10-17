@@ -41,6 +41,7 @@ enum EventKey {
 
 #[derive(serde::Serialize, Debug, PartialEq)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 enum Event {
     ReviewComment(Comment),
     ConversationComment(issues::Comment),
