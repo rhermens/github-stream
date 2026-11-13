@@ -1,5 +1,6 @@
 # github-stream
 
+hjallo
 Watch GitHub pull request activity from your terminal.
 
 `github-stream` polls pull requests in all states, selected by your local branch
