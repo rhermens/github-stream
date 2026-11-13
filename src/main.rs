@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, error::Error, path::PathBuf, time::Duration};
+use std::{collections::HashMap, env, error::Error, time::Duration};
 
 use chrono::{Local, Utc};
 use clap::Parser;
@@ -17,17 +17,8 @@ use octocrab::{
 };
 use serde::Serialize;
 
-#[derive(Debug, clap::Parser)]
-struct Args {
-    #[arg(short, long, default_value_t = 30)]
-    pub interval: u64,
-
-    #[arg(short, long)]
-    pub cwd: Option<PathBuf>,
-
-    #[arg(short, long)]
-    pub pr: Option<u64>,
-}
+mod cli;
+use cli::Args;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum EventKey {

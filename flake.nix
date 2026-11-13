@@ -24,6 +24,12 @@
 
         bin = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
+
+          postInstall = ''
+            find "''${CARGO_TARGET_DIR:-target}" -name github-stream.1 -exec \
+              install -Dm644 {} "$out/share/man/man1/github-stream.1" \;
+            test -f "$out/share/man/man1/github-stream.1"
+          '';
         });
       in
       {
